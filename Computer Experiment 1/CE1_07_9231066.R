@@ -14,9 +14,9 @@ throws <- sample(1:6, n, replace = TRUE, prob = prob)
 pdf <- data.frame(table(throws) / n)
 
 plot.sim <- ggplot(data = data.frame(pdf), aes(x = throws, weight = Freq))
-plot.sim <- plot.sim + geom_bar()
+plot.sim <- plot.sim + geom_bar(fill = '#56B4E9')
 
 plot.true <- ggplot(data = data.frame(prob), aes(x = 1:6, weight = prob))
-plot.true <- plot.true + geom_bar()
+plot.true <- plot.true + geom_bar(fill = '#56B4E9')
 
 grid.arrange(plot.sim, plot.true, nrow = 2)

@@ -20,5 +20,5 @@ for (i in seq(1, 1000)) {
 
 win.1 <- prize[1:1000] == select.true
 win.2 <- prize[1001:2000] == select[1001:2000]
-sprintf("Winning probability if we change the door: %0.5f", sum(win.1) / 1000)
-sprintf("Winning probability if we don't change the door: %0.5f", sum(win.2) / 1000)
+print(sprintf("Winning probability if we change the door: %0.5f", mean(win.1)))
+print(sprintf("Winning probability if we don't change the door: %0.5f", mean(win.2)))
