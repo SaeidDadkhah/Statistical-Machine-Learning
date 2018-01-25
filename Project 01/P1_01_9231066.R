@@ -7,6 +7,139 @@ library('reshape2')
 
 # delete old data
 rm(list = ls())
+set.seed(9231066)
+
+# functions
+measure <- function(y, y.hat, complexity) {
+    stats <- list()
+    
+    mean.tmp <- mean(y)
+    
+    stats[['residuals']] <- y - y.hat
+    stats[['rss']] <- sum(stats$residuals ^ 2)
+    stats[['sigma2']] <- sum(stats$residuals ^ 2) / nrow(y)
+    stats[['UnbiasedSigma2']] <- sum(stats$residuals ^ 2) / (nrow(y) - complexity)
+    stats[['r2']] <- 1 - stats$rss / sum((y - mean.tmp) ^ 2)
+    stats[['ll']] <- -0.5 * nrow(y) * (log(2*pi) + 1 + log(stats$rss / nrow(y)))
+    stats[['AIC']] <- -2 * stats$ll + ((complexity + 1) * 2)
+    stats[['BIC']] <- -2 * stats$ll + ((complexity + 1) * log(nrow(y)))
+    
+    stats
+}
+
+# linear model
+myLM.predict <- function(model, X) {
+    X <- cbind(
+        matrix(1, nrow = nrow(X), ncol = 1),
+        X
+    )
+    
+    X %*% model$beta
+}
+
+myLM.train <- function(X.train, y.train, X.test, y.test) {
+    X.train <- cbind(
+        matrix(1, nrow = nrow(X.train), ncol = 1),
+        X.train
+    )
+    if (is.null(colnames(X.train))) {
+        colnames(X.train) <- c('(Intercept)', 'First Feature')
+    }
+    colnames(X.train)[1] <- '(Intercept)'
+    
+    model <- list()
+    model[['beta']] <- solve(t(X.train) %*% X.train) %*% t(X.train) %*% y.train
+    
+    model[['train']] <- measure(y = y.train,
+                                y.hat = X.train %*% model$beta,
+                                complexity = nrow(model$beta))
+    model[['test']] <- measure(y = y.test,
+                               y.hat = myLM.predict(model, X.test),
+                               complexity = nrow(model$beta))
+    
+    model[['CovMat']] <- model$train$UnbiasedSigma2 * solve(t(X.train) %*% X.train)
+    
+    Xs <- data.matrix(X.train)
+    U <- Xs %*% solve(t(Xs) %*% Xs) %*% t(Xs)
+    model[['L1O']] <- sum(model$train$residuals ^ 2 / (1 - diag(U)))
+    
+    model
+}
+
+# Rcv
+cv.l1o.n <- function(train, test, feature.columns) {
+    r.cv.n <- 0
+    for (i in 1:nrow(train)) {
+        m <- myLM.train(data.matrix(train[-i, feature.columns]),
+                        data.matrix(train[-i, 'V9']),
+                        data.matrix(test[, feature.columns]),
+                        data.matrix(test[, 'V9']))
+        y.hat <- myLM.predict(m, data.matrix(train[i, feature.columns]))
+        r.cv.n <- r.cv.n + (train[i, 'V9'] - y.hat) ^ 2
+    }
+    
+    r.cv.n
+}
+
+# base function
+printAnalysis <- function(model, variables) {
+    print(sprintf('Model %s:', variables))
+    print(sprintf('   Rcv(L1O): %0.4f', model$L1O))
+    print(sprintf('   Train:'))
+    print(sprintf('      Residual Sum of Squares: %0.4f', model$train$rss))
+    print(sprintf('      R Squared: %0.4f', model$train$r2))
+    print(sprintf('      AIC: %0.4f', model$train$AIC))
+    print(sprintf('      BIC: %0.4f', model$train$BIC))
+    print(sprintf('   Test:'))
+    print(sprintf('      Residual Sum of Squares: %0.4f', model$test$rss))
+    print(sprintf('      R Squared: %0.4f', model$test$r2))
+    print(sprintf('      AIC: %0.4f', model$test$AIC))
+    print(sprintf('      BIC: %0.4f', model$test$BIC))
+}
+
+addOthersAndAnalyze <- function(data.train, data.test, fixedColumns) {
+    models <- list()
+    fixedColumns.text <- c()
+    for (i in fixedColumns) {
+        fixedColumns.text <- c(fixedColumns.text, sprintf('V%d', i))
+    }
+    for (i in 1:8) {
+        if (i %in% fixedColumns) next
+        
+        models[[i]] <- list()
+        
+        x <- sprintf('V%d', i)
+        models[[i]] <- myLM.train(data.matrix(data.train[, c(fixedColumns.text, x)]),
+                                  data.matrix(data.train[, c('V9')]),
+                                  data.matrix(data.test[, c(fixedColumns.text, x)]),
+                                  data.matrix(data.test[, c('V9')]))
+        
+        printAnalysis(models[[i]], sprintf('%s and %d', paste(fixedColumns[i], collapse = ", "), i))
+    }
+    
+    models
+}
+
+removeOneAndAnalyze <- function(data.train, data.test, allColumns) {
+    models <- list()
+    allColumns.text <- c()
+    for (i in allColumns) {
+        allColumns.text <- c(allColumns.text, sprintf('V%d', i))
+    }
+    for (i in 1:length(allColumns)) {
+        models[[allColumns.text[[i]]]] <- list()
+        currentColumns.text <- allColumns.text[-i]
+        
+        models[[allColumns.text[[i]]]] <- myLM.train(data.matrix(data.train[, currentColumns.text]),
+                                                     data.matrix(data.train[, c('V9')]),
+                                                     data.matrix(data.test[, currentColumns.text]),
+                                                     data.matrix(data.test[, c('V9')]))
+        
+        printAnalysis(models[[allColumns.text[[i]]]], sprintf('%s', paste(currentColumns.text, collapse = ", ")))
+    }
+    
+    models
+}
 
 # read and split data
 data <- read.csv('data/Dataset1.csv', header = FALSE)
@@ -91,6 +224,7 @@ for (i in 1:8) {
     
     x <- sprintf('V%d', i)
     models[[i]]$d <- data.frame(X = train[[x]], Y = train[['V9']])
+    models[[i]]$t <- data.frame(X = test[[x]], Y = test[['V9']])
     
     models[[i]]$slope <- list()
     models[[i]]$intercept <- list()
@@ -101,32 +235,14 @@ for (i in 1:8) {
     models[[i]]$plot <- ggplot(data = models[[i]]$d, aes(x = X, y = Y))
     models[[i]]$plot <- models[[i]]$plot + geom_point(color = '#56B4E9')
     
-    models[[i]]$train <- list()
-    models[[i]]$train$prediction <- models[[i]]$predictor(models[[i]]$d$X)
-    models[[i]]$train$rss <- sum((models[[i]]$d$Y - models[[i]]$train$prediction) ^ 2)
-    models[[i]]$train$tss <- var(models[[i]]$d$Y) * nrow(models[[i]]$d)
-    models[[i]]$train$r2 <- 1 - models[[i]]$train$rss / models[[i]]$train$tss
-    models[[i]]$train$sigma2 <- models[[i]]$train$rss / nrow(models[[i]]$d)
-    models[[i]]$train$AIC <- nrow(models[[i]]$d) *
-        (log(2*pi) + 1 + log(models[[i]]$train$rss / nrow(models[[i]]$d))) +
-        ((2 + 1) * 2)
+    models[[i]]$train <- measure(data.matrix(models[[i]]$d$Y), data.matrix(models[[i]]$predictor(models[[i]]$d$X)), 2)
+    models[[i]]$test <- measure(data.matrix(models[[i]]$t$Y), data.matrix(models[[i]]$predictor(models[[i]]$t$X)), 2)
     
     m <- mean(models[[i]]$d$X)
     models[[i]]$slope$sd <- sqrt(models[[i]]$train$sigma2 / sum((models[[i]]$d$X - m) ^ 2))
     models[[i]]$intercept$sd <- sqrt(models[[i]]$train$sigma2 / sum((models[[i]]$d$X - m) ^ 2)) * 
         sqrt(sum(models[[i]]$d$X ^ 2) / nrow(models[[i]]$d))
     
-    models[[i]]$t <- data.frame(X = test[[x]], Y = test[['V9']])
-    
-    models[[i]]$test <- list()
-    models[[i]]$test$prediction <- models[[i]]$predictor(models[[i]]$t$X)
-    models[[i]]$test$rss <- sum((models[[i]]$t$Y - models[[i]]$test$prediction) ^ 2)
-    models[[i]]$test$tss <- var(models[[i]]$t$Y) * nrow(models[[i]]$t)
-    models[[i]]$test$r2 <- 1 - models[[i]]$test$rss / models[[i]]$test$tss
-    models[[i]]$test$sigma2 <- models[[i]]$test$rss / nrow(models[[i]]$t)
-    models[[i]]$test$AIC <- nrow(models[[i]]$t) *
-        (log(2*pi) + 1 + log(models[[i]]$test$rss / nrow(models[[i]]$t))) +
-        ((2 + 1) * 2)
     
     print(sprintf('Model %d:', i))
     print(sprintf('   Model:'))
@@ -145,67 +261,40 @@ for (i in 1:8) {
     print(sprintf('      AIC: %0.4f', models[[i]]$test$AIC))
 }
 
-models[[1]]$predictor <- function(x) {models[[1]]$intercept$estimate + models[[1]]$slope$estimate * x}
-models[[1]]$plot <- models[[1]]$plot + stat_function(fun = models[[1]]$predictor, color = 'red')
-models[[2]]$predictor <- function(x) {models[[2]]$intercept$estimate + models[[2]]$slope$estimate * x}
-models[[2]]$plot <- models[[2]]$plot + stat_function(fun = models[[2]]$predictor, color = 'red')
-models[[3]]$predictor <- function(x) {models[[3]]$intercept$estimate + models[[3]]$slope$estimate * x}
-models[[3]]$plot <- models[[3]]$plot + stat_function(fun = models[[3]]$predictor, color = 'red')
-models[[4]]$predictor <- function(x) {models[[4]]$intercept$estimate + models[[4]]$slope$estimate * x}
-models[[4]]$plot <- models[[4]]$plot + stat_function(fun = models[[4]]$predictor, color = 'red')
-models[[5]]$predictor <- function(x) {models[[5]]$intercept$estimate + models[[5]]$slope$estimate * x}
-models[[5]]$plot <- models[[5]]$plot + stat_function(fun = models[[5]]$predictor, color = 'red')
-models[[6]]$predictor <- function(x) {models[[6]]$intercept$estimate + models[[6]]$slope$estimate * x}
-models[[6]]$plot <- models[[6]]$plot + stat_function(fun = models[[6]]$predictor, color = 'red')
-models[[7]]$predictor <- function(x) {models[[7]]$intercept$estimate + models[[7]]$slope$estimate * x}
-models[[7]]$plot <- models[[7]]$plot + stat_function(fun = models[[7]]$predictor, color = 'red')
-models[[8]]$predictor <- function(x) {models[[8]]$intercept$estimate + models[[8]]$slope$estimate * x}
-models[[8]]$plot <- models[[8]]$plot + stat_function(fun = models[[8]]$predictor, color = 'red')
+m <- models
+models <- list()
+models$AIC <- list()
+models$AIC[[1]] <- m
 
-# grid.arrange(models[[1]]$plot,
-#              models[[2]]$plot,
-#              models[[3]]$plot,
-#              models[[4]]$plot,
-#              models[[5]]$plot,
-#              models[[6]]$plot,
-#              models[[7]]$plot,
-#              models[[8]]$plot,
+models$AIC[[1]][[1]]$predictor <- function(x) {models$AIC[[1]][[1]]$intercept$estimate + models$AIC[[1]][[1]]$slope$estimate * x}
+models$AIC[[1]][[1]]$plot <- models$AIC[[1]][[1]]$plot + stat_function(fun = models$AIC[[1]][[1]]$predictor, color = 'red')
+models$AIC[[1]][[2]]$predictor <- function(x) {models$AIC[[1]][[2]]$intercept$estimate + models$AIC[[1]][[2]]$slope$estimate * x}
+models$AIC[[1]][[2]]$plot <- models$AIC[[1]][[2]]$plot + stat_function(fun = models$AIC[[1]][[2]]$predictor, color = 'red')
+models$AIC[[1]][[3]]$predictor <- function(x) {models$AIC[[1]][[3]]$intercept$estimate + models$AIC[[1]][[3]]$slope$estimate * x}
+models$AIC[[1]][[3]]$plot <- models$AIC[[1]][[3]]$plot + stat_function(fun = models$AIC[[1]][[3]]$predictor, color = 'red')
+models$AIC[[1]][[4]]$predictor <- function(x) {models$AIC[[1]][[4]]$intercept$estimate + models$AIC[[1]][[4]]$slope$estimate * x}
+models$AIC[[1]][[4]]$plot <- models$AIC[[1]][[4]]$plot + stat_function(fun = models$AIC[[1]][[4]]$predictor, color = 'red')
+models$AIC[[1]][[5]]$predictor <- function(x) {models$AIC[[1]][[5]]$intercept$estimate + models$AIC[[1]][[5]]$slope$estimate * x}
+models$AIC[[1]][[5]]$plot <- models$AIC[[1]][[5]]$plot + stat_function(fun = models$AIC[[1]][[5]]$predictor, color = 'red')
+models$AIC[[1]][[6]]$predictor <- function(x) {models$AIC[[1]][[6]]$intercept$estimate + models$AIC[[1]][[6]]$slope$estimate * x}
+models$AIC[[1]][[6]]$plot <- models$AIC[[1]][[6]]$plot + stat_function(fun = models$AIC[[1]][[6]]$predictor, color = 'red')
+models$AIC[[1]][[7]]$predictor <- function(x) {models$AIC[[1]][[7]]$intercept$estimate + models$AIC[[1]][[7]]$slope$estimate * x}
+models$AIC[[1]][[7]]$plot <- models$AIC[[1]][[7]]$plot + stat_function(fun = models$AIC[[1]][[7]]$predictor, color = 'red')
+models$AIC[[1]][[8]]$predictor <- function(x) {models$AIC[[1]][[8]]$intercept$estimate + models$AIC[[1]][[8]]$slope$estimate * x}
+models$AIC[[1]][[8]]$plot <- models$AIC[[1]][[8]]$plot + stat_function(fun = models$AIC[[1]][[8]]$predictor, color = 'red')
+
+# grid.arrange(models$AIC[[1]][[1]]$plot,
+#              models$AIC[[1]][[2]]$plot,
+#              models$AIC[[1]][[3]]$plot,
+#              models$AIC[[1]][[4]]$plot,
+#              models$AIC[[1]][[5]]$plot,
+#              models$AIC[[1]][[6]]$plot,
+#              models$AIC[[1]][[7]]$plot,
+#              models$AIC[[1]][[8]]$plot,
 #              nrow = 2,
 #              ncol = 4)
 
 # c) second feature
-analyze_and_print <- function(model, variables) {
-    model$train <- list()
-    model$train$rss <- sum((model$lm$residuals) ^ 2)
-    model$train$r2 <- summary(model$lm)$r.squared
-    model$train$ll <- -0.5 * nrow(model$d) * (log(2*pi) + 1 + log(model$train$rss / nrow(model$d)))
-    model$train$AIC <- -2 * model$train$ll + ((length(model$lm$coefficients) + 1) * 2)
-    model$train$BIC <- -2 * model$train$ll + ((length(model$lm$coefficients) + 1) * log(nrow(model$d)))
-    
-    model$test <- list()
-    model$test$prediction <- predict(model$lm, model$t)
-    model$test$rss <- sum((model$t$Y - model$test$prediction) ^ 2)
-    model$test$tss <- var(model$t$Y) * nrow(model$t)
-    model$test$r2 <- 1 - model$test$rss / model$test$tss
-    model$test$ll <- -0.5 * nrow(model$t) * (log(2*pi) + 1 + log(model$test$rss / nrow(model$t)))
-    model$test$AIC <- -2 * model$test$ll + ((length(model$lm$coefficients) + 1) * 2)
-    model$test$BIC <- -2 * model$test$ll + ((length(model$lm$coefficients) + 1) * log(nrow(model$t)))
-    
-    print(sprintf('Model %s:', variables))
-    print(sprintf('   Train:'))
-    print(sprintf('      Residual Sum of Squares: %0.4f', model$train$rss))
-    print(sprintf('      R Squared: %0.4f', model$train$r2))
-    print(sprintf('      AIC: %0.4f', model$train$AIC))
-    print(sprintf('      BIC: %0.4f', model$train$BIC))
-    print(sprintf('   Test:'))
-    print(sprintf('      Residual Sum of Squares: %0.4f', model$test$rss))
-    print(sprintf('      R Squared: %0.4f', model$test$r2))
-    print(sprintf('      AIC: %0.4f', model$test$AIC))
-    print(sprintf('      BIC: %0.4f', model$test$BIC))
-    
-    return(model)
-}
-
 print("")
 print("|=========================================|")
 print("|                                         |")
@@ -213,19 +302,7 @@ print("|>>>>> Part C: Select second Feature <<<<<|")
 print("|                                         |")
 print("|_________________________________________|")
 
-models2 <- list()
-for (i in 1:8) {
-    if (i %in% c(4)) next
-    
-    models2[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models2[[i]]$d <- data.frame(X1 = train[['V4']], X2 = train[[x]], Y = train[['V9']])
-    models2[[i]]$t <- data.frame(X1 = test[['V4']], X2 = test[[x]], Y = test[['V9']])
-    models2[[i]]$lm <- lm(data = models2[[i]]$d, Y ~ X1 + X2)
-    
-    models2[[i]] <- analyze_and_print(models2[[i]], sprintf('4 and %d', i))
-}
+models$AIC[[2]] <- addOthersAndAnalyze(train, test, c(4))
 
 # d) third feature
 print("")
@@ -235,25 +312,7 @@ print("|>>>>> Part D: Select Third Feature <<<<<|")
 print("|                                        |")
 print("|________________________________________|")
 
-models3 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8)) next
-    
-    models3[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models3[[i]]$d <- data.frame(X1 = train[['V4']],
-                                 X2 = train[['V8']],
-                                 X3 = train[[x]],
-                                 Y = train[['V9']])
-    models3[[i]]$t <- data.frame(X1 = test[['V4']],
-                                 X2 = test[['V8']],
-                                 X3 = test[[x]],
-                                 Y = test[['V9']])
-    models3[[i]]$lm <- lm(data = models3[[i]]$d, Y ~ X1 + X2 + X3)
-    
-    models3[[i]] <- analyze_and_print(models3[[i]], sprintf('4, 8 and %d', i))
-}
+models$AIC[[3]] <- addOthersAndAnalyze(train, test, c(4, 8))
 
 # d) fourth feature
 print("")
@@ -263,26 +322,7 @@ print("|>>>>> Part D: Select Fourth Feature <<<<<|")
 print("|                                         |")
 print("|_________________________________________|")
 
-models4 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1)) next
-    
-    models4[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models4[[i]]$d <- data.frame(X1 = train[['V4']],
-                                 X2 = train[['V8']],
-                                 X3 = train[['V1']],
-                                 X4 = train[[x]],
-                                 Y = train[['V9']])
-    models4[[i]]$t <- data.frame(X1 = test[['V4']],
-                                 X2 = test[['V8']],
-                                 X3 = test[['V1']],
-                                 X4 = test[[x]],
-                                 Y = test[['V9']])
-    models4[[i]]$lm <- lm(data = models4[[i]]$d, Y ~ X1 + X2 + X3 + X4)
-    models4[[i]] <- analyze_and_print(model = models4[[i]], sprintf('4, 8, 1 and %d', i))
-}
+models$AIC[[4]] <- addOthersAndAnalyze(train, test, c(4, 8, 1))
 
 # d) fifth feature
 print("")
@@ -292,28 +332,7 @@ print("|>>>>> Part D: Select Fifth Feature <<<<<|")
 print("|                                        |")
 print("|________________________________________|")
 
-models5 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1, 3)) next
-    
-    models5[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models5[[i]]$d <- data.frame(X1 = train[['V4']],
-                                 X2 = train[['V8']],
-                                 X3 = train[['V1']],
-                                 X4 = train[['V3']],
-                                 X5 = train[[x]],
-                                 Y = train[['V9']])
-    models5[[i]]$t <- data.frame(X1 = test[['V4']],
-                                 X2 = test[['V8']],
-                                 X3 = test[['V1']],
-                                 X4 = test[['V3']],
-                                 X5 = test[[x]],
-                                 Y = test[['V9']])
-    models5[[i]]$lm <- lm(data = models5[[i]]$d, Y ~ X1 + X2 + X3 + X4 + X5)
-    models5[[i]] <- analyze_and_print(model = models5[[i]], sprintf('4, 8, 1, 3 and %d', i))
-}
+models$AIC[[5]] <- addOthersAndAnalyze(train, test, c(4, 8, 1, 3))
 
 # d) sixth feature
 print("")
@@ -323,30 +342,7 @@ print("|>>>>> Part D: Select Sixth Feature <<<<<|")
 print("|                                        |")
 print("|________________________________________|")
 
-models6 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1, 3, 5)) next
-    
-    models6[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models6[[i]]$d <- data.frame(X1 = train[['V4']],
-                                 X2 = train[['V8']],
-                                 X3 = train[['V1']],
-                                 X4 = train[['V3']],
-                                 X5 = train[['V5']],
-                                 X6 = train[[x]],
-                                 Y = train[['V9']])
-    models6[[i]]$t <- data.frame(X1 = test[['V4']],
-                                 X2 = test[['V8']],
-                                 X3 = test[['V1']],
-                                 X4 = test[['V3']],
-                                 X5 = test[['V5']],
-                                 X6 = test[[x]],
-                                 Y = test[['V9']])
-    models6[[i]]$lm <- lm(data = models6[[i]]$d, Y ~ X1 + X2 + X3 + X4 + X5 + X6)
-    models6[[i]] <- analyze_and_print(model = models6[[i]], sprintf('4, 8, 1, 3, 5 and %d', i))
-}
+models$AIC[[6]] <- addOthersAndAnalyze(train, test, c(4, 8, 1, 3, 5))
 
 # d) seventh feature
 print("")
@@ -356,32 +352,7 @@ print("|>>>>> Part D: Select Seventh Feature <<<<<|")
 print("|                                          |")
 print("|__________________________________________|")
 
-models7 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1, 3, 5, 7)) next
-    
-    models7[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models7[[i]]$d <- data.frame(X1 = train[['V4']],
-                                 X2 = train[['V8']],
-                                 X3 = train[['V1']],
-                                 X4 = train[['V3']],
-                                 X5 = train[['V5']],
-                                 X6 = train[['V7']],
-                                 X7 = train[[x]],
-                                 Y = train[['V9']])
-    models7[[i]]$t <- data.frame(X1 = test[['V4']],
-                                 X2 = test[['V8']],
-                                 X3 = test[['V1']],
-                                 X4 = test[['V3']],
-                                 X5 = test[['V5']],
-                                 X6 = test[['V7']],
-                                 X7 = test[[x]],
-                                 Y = test[['V9']])
-    models7[[i]]$lm <- lm(data = models7[[i]]$d, Y ~ X1 + X2 + X3 + X4 + X5 + X6 + X7)
-    models7[[i]] <- analyze_and_print(model = models7[[i]], sprintf('4, 8, 1, 3, 5, 7 and %d', i))
-}
+models$AIC[[7]] <- addOthersAndAnalyze(train, test, c(4, 8, 1, 3, 5, 7))
 
 # d) eighth feature
 print("")
@@ -391,81 +362,64 @@ print("|>>>>> Part D: Analyze Eighth Feature <<<<<|")
 print("|                                          |")
 print("|__________________________________________|")
 
-models8 <- list()
-models8[[6]] <- list()
-
-models8[[6]]$d <- data.frame(X1 = train[['V4']],
-                             X2 = train[['V8']],
-                             X3 = train[['V1']],
-                             X4 = train[['V3']],
-                             X5 = train[['V5']],
-                             X6 = train[['V7']],
-                             X7 = train[['V2']],
-                             X8 = train[['V6']],
-                             Y = train[['V9']])
-models8[[6]]$t <- data.frame(X1 = test[['V4']],
-                             X2 = test[['V8']],
-                             X3 = test[['V1']],
-                             X4 = test[['V3']],
-                             X5 = test[['V5']],
-                             X6 = test[['V7']],
-                             X7 = test[['V2']],
-                             X8 = test[['V6']],
-                             Y = test[['V9']])
-models8[[6]]$lm <- lm(data = models8[[6]]$d, Y ~ X1 + X2 + X3 + X4 + X5 + X6 + X7 + X8)
-models8[[6]] <- analyze_and_print(model = models8[[6]], '4, 8, 1, 3, 5, 7, 2 and 6')
+models$AIC[[8]] <- list()
+models$AIC[[8]][[6]] <-  myLM.train(data.matrix(train[, c('V4', 'V8', 'V1', 'V3', 'V5', 'V7', 'V2', 'V6')]),
+                                 data.matrix(train[, c('V9')]),
+                                 data.matrix(test[, c('V4', 'V8', 'V1', 'V3', 'V5', 'V7', 'V2', 'V6')]),
+                                 data.matrix(test[, c('V9')]))
+printAnalysis(models$AIC[[8]][[6]], '4, 8, 1, 3, 5, 7, 2 and 6')
 
 # d) plots
 df.AIC <- data.frame(x = 1:8,
                      X = c(4, 8, 1, 3, 5, 7, 2, 6),
-                     RSS_Train = c(models[[4]]$train$rss,
-                                   models2[[8]]$train$rss,
-                                   models3[[1]]$train$rss,
-                                   models4[[3]]$train$rss,
-                                   models5[[5]]$train$rss,
-                                   models6[[7]]$train$rss,
-                                   models7[[2]]$train$rss,
-                                   models8[[6]]$train$rss),
-                     RSS_Test = c(models[[4]]$test$rss,
-                                  models2[[8]]$test$rss,
-                                  models3[[1]]$test$rss,
-                                  models4[[3]]$test$rss,
-                                  models5[[5]]$test$rss,
-                                  models6[[7]]$test$rss,
-                                  models7[[2]]$test$rss,
-                                  models8[[6]]$test$rss),
-                     R2_Train = c(models[[4]]$train$r2,
-                                  models2[[8]]$train$r2,
-                                  models3[[1]]$train$r2,
-                                  models4[[3]]$train$r2,
-                                  models5[[5]]$train$r2,
-                                  models6[[7]]$train$r2,
-                                  models7[[2]]$train$r2,
-                                  models8[[6]]$train$r2),
-                     R2_Test = c(models[[4]]$test$r2,
-                                 models2[[8]]$test$r2,
-                                 models3[[1]]$test$r2,
-                                 models4[[3]]$test$r2,
-                                 models5[[5]]$test$r2,
-                                 models6[[7]]$test$r2,
-                                 models7[[2]]$test$r2,
-                                 models8[[6]]$test$r2),
-                     AIC_Train = c(models[[4]]$train$AIC,
-                                   models2[[8]]$train$AIC,
-                                   models3[[1]]$train$AIC,
-                                   models4[[3]]$train$AIC,
-                                   models5[[5]]$train$AIC,
-                                   models6[[7]]$train$AIC,
-                                   models7[[2]]$train$AIC,
-                                   models8[[6]]$train$AIC),
-                     AIC_Test = c(models[[4]]$test$AIC,
-                                  models2[[8]]$test$AIC,
-                                  models3[[1]]$test$AIC,
-                                  models4[[3]]$test$AIC,
-                                  models5[[5]]$test$AIC,
-                                  models6[[7]]$test$AIC,
-                                  models7[[2]]$test$AIC,
-                                  models8[[6]]$test$AIC))
+                     RSS_Train = c(models$AIC[[1]][[4]]$train$rss,
+                                   models$AIC[[2]][[8]]$train$rss,
+                                   models$AIC[[3]][[1]]$train$rss,
+                                   models$AIC[[4]][[3]]$train$rss,
+                                   models$AIC[[5]][[5]]$train$rss,
+                                   models$AIC[[6]][[7]]$train$rss,
+                                   models$AIC[[7]][[2]]$train$rss,
+                                   models$AIC[[8]][[6]]$train$rss),
+                     RSS_Test = c(models$AIC[[1]][[4]]$test$rss,
+                                  models$AIC[[2]][[8]]$test$rss,
+                                  models$AIC[[3]][[1]]$test$rss,
+                                  models$AIC[[4]][[3]]$test$rss,
+                                  models$AIC[[5]][[5]]$test$rss,
+                                  models$AIC[[6]][[7]]$test$rss,
+                                  models$AIC[[7]][[2]]$test$rss,
+                                  models$AIC[[8]][[6]]$test$rss),
+                     R2_Train = c(models$AIC[[1]][[4]]$train$r2,
+                                  models$AIC[[2]][[8]]$train$r2,
+                                  models$AIC[[3]][[1]]$train$r2,
+                                  models$AIC[[4]][[3]]$train$r2,
+                                  models$AIC[[5]][[5]]$train$r2,
+                                  models$AIC[[6]][[7]]$train$r2,
+                                  models$AIC[[7]][[2]]$train$r2,
+                                  models$AIC[[8]][[6]]$train$r2),
+                     R2_Test = c(models$AIC[[1]][[4]]$test$r2,
+                                 models$AIC[[2]][[8]]$test$r2,
+                                 models$AIC[[3]][[1]]$test$r2,
+                                 models$AIC[[4]][[3]]$test$r2,
+                                 models$AIC[[5]][[5]]$test$r2,
+                                 models$AIC[[6]][[7]]$test$r2,
+                                 models$AIC[[7]][[2]]$test$r2,
+                                 models$AIC[[8]][[6]]$test$r2),
+                     AIC_Train = c(models$AIC[[1]][[4]]$train$AIC,
+                                   models$AIC[[2]][[8]]$train$AIC,
+                                   models$AIC[[3]][[1]]$train$AIC,
+                                   models$AIC[[4]][[3]]$train$AIC,
+                                   models$AIC[[5]][[5]]$train$AIC,
+                                   models$AIC[[6]][[7]]$train$AIC,
+                                   models$AIC[[7]][[2]]$train$AIC,
+                                   models$AIC[[8]][[6]]$train$AIC),
+                     AIC_Test = c(models$AIC[[1]][[4]]$test$AIC,
+                                  models$AIC[[2]][[8]]$test$AIC,
+                                  models$AIC[[3]][[1]]$test$AIC,
+                                  models$AIC[[4]][[3]]$test$AIC,
+                                  models$AIC[[5]][[5]]$test$AIC,
+                                  models$AIC[[6]][[7]]$test$AIC,
+                                  models$AIC[[7]][[2]]$test$AIC,
+                                  models$AIC[[8]][[6]]$test$AIC))
 
 plot.AIC <- ggplot(data = df.AIC, aes(x = x))
 plot.AIC <- plot.AIC + geom_line(aes(y = log(150 + AIC_Train), color = 'AIC of Train Set'))
@@ -495,18 +449,8 @@ print("|>>>>> Part E: Select First Feature by BIC <<<<<|")
 print("|                                               |")
 print("|_______________________________________________|")
 
-models.bic.1 <- list()
-for (i in 1:8) {
-    models.bic.1[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.1[[i]]$d <- data.frame(X1 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.1[[i]]$t <- data.frame(X1 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.1[[i]]$lm <- lm(data = models.bic.1[[i]]$d, Y ~ X1)
-    models.bic.1[[i]] <- analyze_and_print(model = models.bic.1[[i]], sprintf('%d', i))
-}
+models$BIC <- list()
+models$BIC[[1]] <- addOthersAndAnalyze(train, test, c())
 
 # e) model selection using BIC
 print("")
@@ -516,22 +460,7 @@ print("|>>>>> Part E: Select Second Feature by BIC <<<<<|")
 print("|                                                |")
 print("|________________________________________________|")
 
-models.bic.2 <- list()
-for (i in 1:8) {
-    if (i %in% c(4)) next
-    
-    models.bic.2[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.2[[i]]$d <- data.frame(X1 = train[['V4']],
-                                      X2 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.2[[i]]$t <- data.frame(X1 = test[['V4']],
-                                      X2 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.2[[i]]$lm <- lm(data = models.bic.2[[i]]$d, Y ~ X1 + X2)
-    models.bic.2[[i]] <- analyze_and_print(model = models.bic.2[[i]], sprintf('4 and %d', i))
-}
+models$BIC[[2]] <- addOthersAndAnalyze(train, test, c(4))
 
 # e) model selection using BIC
 print("")
@@ -541,24 +470,7 @@ print("|>>>>> Part E: Select Third Feature by BIC <<<<<|")
 print("|                                               |")
 print("|_______________________________________________|")
 
-models.bic.3 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8)) next
-    
-    models.bic.3[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.3[[i]]$d <- data.frame(X1 = train[['V4']],
-                                      X2 = train[['V8']],
-                                      X3 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.3[[i]]$t <- data.frame(X1 = test[['V4']],
-                                      X2 = test[['V8']],
-                                      X3 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.3[[i]]$lm <- lm(data = models.bic.3[[i]]$d, Y ~ X1 + X2 + X3)
-    models.bic.3[[i]] <- analyze_and_print(model = models.bic.3[[i]], sprintf('4, 8 and %d', i))
-}
+models$BIC[[3]] <- addOthersAndAnalyze(train, test, c(4, 8))
 
 # e) model selection using BIC
 print("")
@@ -568,26 +480,7 @@ print("|>>>>> Part E: Select Fourth Feature by BIC <<<<<|")
 print("|                                                |")
 print("|________________________________________________|")
 
-models.bic.4 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1)) next
-    
-    models.bic.4[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.4[[i]]$d <- data.frame(X1 = train[['V4']],
-                                      X2 = train[['V8']],
-                                      X3 = train[['V1']],
-                                      X4 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.4[[i]]$t <- data.frame(X1 = test[['V4']],
-                                      X2 = test[['V8']],
-                                      X3 = test[['V1']],
-                                      X4 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.4[[i]]$lm <- lm(data = models.bic.4[[i]]$d, Y ~ X1 + X2 + X3 + X4)
-    models.bic.4[[i]] <- analyze_and_print(model = models.bic.4[[i]], sprintf('4, 8, 1 and %d', i))
-}
+models$BIC[[4]] <- addOthersAndAnalyze(train, test, c(4, 8, 1))
 
 # e) model selection using BIC
 print("")
@@ -597,28 +490,7 @@ print("|>>>>> Part E: Select Fifth Feature by BIC <<<<<|")
 print("|                                               |")
 print("|_______________________________________________|")
 
-models.bic.5 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1, 3)) next
-    
-    models.bic.5[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.5[[i]]$d <- data.frame(X1 = train[['V4']],
-                                      X2 = train[['V8']],
-                                      X3 = train[['V1']],
-                                      X4 = train[['V3']],
-                                      X5 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.5[[i]]$t <- data.frame(X1 = test[['V4']],
-                                      X2 = test[['V8']],
-                                      X3 = test[['V1']],
-                                      X4 = test[['V3']],
-                                      X5 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.5[[i]]$lm <- lm(data = models.bic.5[[i]]$d, Y ~ X1 + X2 + X3 + X4 + X5)
-    models.bic.5[[i]] <- analyze_and_print(model = models.bic.5[[i]], sprintf('4, 8, 1, 3 and %d', i))
-}
+models$BIC[[5]] <- addOthersAndAnalyze(train, test, c(4, 8, 1, 3))
 
 # e) model selection using BIC
 print("")
@@ -628,30 +500,7 @@ print("|>>>>> Part E: Select Sixth Feature by BIC <<<<<|")
 print("|                                               |")
 print("|_______________________________________________|")
 
-models.bic.6 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1, 3, 5)) next
-    
-    models.bic.6[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.6[[i]]$d <- data.frame(X1 = train[['V4']],
-                                      X2 = train[['V8']],
-                                      X3 = train[['V1']],
-                                      X4 = train[['V3']],
-                                      X5 = train[['V5']],
-                                      X6 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.6[[i]]$t <- data.frame(X1 = test[['V4']],
-                                      X2 = test[['V8']],
-                                      X3 = test[['V1']],
-                                      X4 = test[['V3']],
-                                      X5 = test[['V5']],
-                                      X6 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.6[[i]]$lm <- lm(data = models.bic.6[[i]]$d, Y ~ X1 + X2 + X3 + X4 + X5 + X6)
-    models.bic.6[[i]] <- analyze_and_print(model = models.bic.6[[i]], sprintf('4, 8, 1, 3, 5 and %d', i))
-}
+models$BIC[[6]] <- addOthersAndAnalyze(train, test, c(4, 8, 1, 3, 5))
 
 # e) model selection using BIC
 print("")
@@ -661,32 +510,7 @@ print("|>>>>> Part E: Select Seventh Feature by BIC <<<<<|")
 print("|                                                 |")
 print("|_________________________________________________|")
 
-models.bic.7 <- list()
-for (i in 1:8) {
-    if (i %in% c(4, 8, 1, 3, 5, 7)) next
-    
-    models.bic.7[[i]] <- list()
-    
-    x <- sprintf('V%d', i)
-    models.bic.7[[i]]$d <- data.frame(X1 = train[['V4']],
-                                      X2 = train[['V8']],
-                                      X3 = train[['V1']],
-                                      X4 = train[['V3']],
-                                      X5 = train[['V5']],
-                                      X6 = train[['V7']],
-                                      X7 = train[[x]],
-                                      Y = train[['V9']])
-    models.bic.7[[i]]$t <- data.frame(X1 = test[['V4']],
-                                      X2 = test[['V8']],
-                                      X3 = test[['V1']],
-                                      X4 = test[['V3']],
-                                      X5 = test[['V5']],
-                                      X6 = test[['V7']],
-                                      X7 = test[[x]],
-                                      Y = test[['V9']])
-    models.bic.7[[i]]$lm <- lm(data = models.bic.7[[i]]$d, Y ~ X1 + X2 + X3 + X4 + X5 + X6 + X7)
-    models.bic.7[[i]] <- analyze_and_print(model = models.bic.7[[i]], sprintf('4, 8, 1, 3, 5, 7 and %d', i))
-}
+models$BIC[[7]] <- addOthersAndAnalyze(train, test, c(4, 8, 1, 3, 5, 7))
 
 # e) model selection using BIC
 print("")
@@ -696,80 +520,64 @@ print("|>>>>> Part E: Select Eighth Feature by BIC <<<<<|")
 print("|                                                |")
 print("|________________________________________________|")
 
-models.bic.8 <- list()
-models.bic.8[[6]] <- list()
-models.bic.8[[6]]$d <- data.frame(X1 = train[['V4']],
-                                  X2 = train[['V8']],
-                                  X3 = train[['V1']],
-                                  X4 = train[['V3']],
-                                  X5 = train[['V5']],
-                                  X6 = train[['V7']],
-                                  X7 = train[['V2']],
-                                  X8 = train[['V6']],
-                                  Y = train[['V9']])
-models.bic.8[[6]]$t <- data.frame(X1 = test[['V4']],
-                                  X2 = test[['V8']],
-                                  X3 = test[['V1']],
-                                  X4 = test[['V3']],
-                                  X5 = test[['V5']],
-                                  X6 = test[['V7']],
-                                  X7 = test[['V2']],
-                                  X8 = test[['V6']],
-                                  Y = test[['V9']])
-models.bic.8[[6]]$lm <- lm(data = models.bic.8[[6]]$d, Y ~ X1 + X2 + X3 + X4 + X5 + X6 + X7 + X8)
-models.bic.8[[6]] <- analyze_and_print(model = models.bic.8[[6]], '4, 8, 1, 3, 5, 7, 2 and 6')
+models$BIC[[8]] <- list()
+models$BIC[[8]][[6]] <-  myLM.train(data.matrix(train[, c('V4', 'V8', 'V1', 'V3', 'V5', 'V7', 'V2', 'V6')]),
+                                    data.matrix(train[, c('V9')]),
+                                    data.matrix(test[, c('V4', 'V8', 'V1', 'V3', 'V5', 'V7', 'V2', 'V6')]),
+                                    data.matrix(test[, c('V9')]))
+printAnalysis(models$BIC[[8]][[6]], '4, 8, 1, 3, 5, 7, 2 and 6')
 
 # e) plots
 df.BIC <- data.frame(x = 1:8,
                      X = c(4, 8, 1, 3, 5, 7, 2, 6),
-                     RSS_Train = c(models.bic.1[[4]]$train$rss,
-                                   models.bic.2[[8]]$train$rss,
-                                   models.bic.3[[1]]$train$rss,
-                                   models.bic.4[[3]]$train$rss,
-                                   models.bic.5[[5]]$train$rss,
-                                   models.bic.6[[7]]$train$rss,
-                                   models.bic.7[[2]]$train$rss,
-                                   models.bic.8[[6]]$train$rss),
-                     RSS_Test = c(models.bic.1[[4]]$test$rss,
-                                  models.bic.2[[8]]$test$rss,
-                                  models.bic.3[[1]]$test$rss,
-                                  models.bic.4[[3]]$test$rss,
-                                  models.bic.5[[5]]$test$rss,
-                                  models.bic.6[[7]]$test$rss,
-                                  models.bic.7[[2]]$test$rss,
-                                  models.bic.8[[6]]$test$rss),
-                     R2_Train = c(models.bic.1[[4]]$train$r2,
-                                  models.bic.2[[8]]$train$r2,
-                                  models.bic.3[[1]]$train$r2,
-                                  models.bic.4[[3]]$train$r2,
-                                  models.bic.5[[5]]$train$r2,
-                                  models.bic.6[[7]]$train$r2,
-                                  models.bic.7[[2]]$train$r2,
-                                  models.bic.8[[6]]$train$r2),
-                     R2_Test = c(models.bic.1[[4]]$test$r2,
-                                 models.bic.2[[8]]$test$r2,
-                                 models.bic.3[[1]]$test$r2,
-                                 models.bic.4[[3]]$test$r2,
-                                 models.bic.5[[5]]$test$r2,
-                                 models.bic.6[[7]]$test$r2,
-                                 models.bic.7[[2]]$test$r2,
-                                 models.bic.8[[6]]$test$r2),
-                     BIC_Train = c(models.bic.1[[4]]$train$BIC,
-                                   models.bic.2[[8]]$train$BIC,
-                                   models.bic.3[[1]]$train$BIC,
-                                   models.bic.4[[3]]$train$BIC,
-                                   models.bic.5[[5]]$train$BIC,
-                                   models.bic.6[[7]]$train$BIC,
-                                   models.bic.7[[2]]$train$BIC,
-                                   models.bic.8[[6]]$train$BIC),
-                     BIC_Test = c(models.bic.1[[4]]$test$BIC,
-                                  models.bic.2[[8]]$test$BIC,
-                                  models.bic.3[[1]]$test$BIC,
-                                  models.bic.4[[3]]$test$BIC,
-                                  models.bic.5[[5]]$test$BIC,
-                                  models.bic.6[[7]]$test$BIC,
-                                  models.bic.7[[2]]$test$BIC,
-                                  models.bic.8[[6]]$test$BIC))
+                     RSS_Train = c(models$BIC[[1]][[4]]$train$rss,
+                                   models$BIC[[2]][[8]]$train$rss,
+                                   models$BIC[[3]][[1]]$train$rss,
+                                   models$BIC[[4]][[3]]$train$rss,
+                                   models$BIC[[5]][[5]]$train$rss,
+                                   models$BIC[[6]][[7]]$train$rss,
+                                   models$BIC[[7]][[2]]$train$rss,
+                                   models$BIC[[8]][[6]]$train$rss),
+                     RSS_Test = c(models$BIC[[1]][[4]]$test$rss,
+                                  models$BIC[[2]][[8]]$test$rss,
+                                  models$BIC[[3]][[1]]$test$rss,
+                                  models$BIC[[4]][[3]]$test$rss,
+                                  models$BIC[[5]][[5]]$test$rss,
+                                  models$BIC[[6]][[7]]$test$rss,
+                                  models$BIC[[7]][[2]]$test$rss,
+                                  models$BIC[[8]][[6]]$test$rss),
+                     R2_Train = c(models$BIC[[1]][[4]]$train$r2,
+                                  models$BIC[[2]][[8]]$train$r2,
+                                  models$BIC[[3]][[1]]$train$r2,
+                                  models$BIC[[4]][[3]]$train$r2,
+                                  models$BIC[[5]][[5]]$train$r2,
+                                  models$BIC[[6]][[7]]$train$r2,
+                                  models$BIC[[7]][[2]]$train$r2,
+                                  models$BIC[[8]][[6]]$train$r2),
+                     R2_Test = c(models$BIC[[1]][[4]]$test$r2,
+                                 models$BIC[[2]][[8]]$test$r2,
+                                 models$BIC[[3]][[1]]$test$r2,
+                                 models$BIC[[4]][[3]]$test$r2,
+                                 models$BIC[[5]][[5]]$test$r2,
+                                 models$BIC[[6]][[7]]$test$r2,
+                                 models$BIC[[7]][[2]]$test$r2,
+                                 models$BIC[[8]][[6]]$test$r2),
+                     BIC_Train = c(models$BIC[[1]][[4]]$train$BIC,
+                                   models$BIC[[2]][[8]]$train$BIC,
+                                   models$BIC[[3]][[1]]$train$BIC,
+                                   models$BIC[[4]][[3]]$train$BIC,
+                                   models$BIC[[5]][[5]]$train$BIC,
+                                   models$BIC[[6]][[7]]$train$BIC,
+                                   models$BIC[[7]][[2]]$train$BIC,
+                                   models$BIC[[8]][[6]]$train$BIC),
+                     BIC_Test = c(models$BIC[[1]][[4]]$test$BIC,
+                                  models$BIC[[2]][[8]]$test$BIC,
+                                  models$BIC[[3]][[1]]$test$BIC,
+                                  models$BIC[[4]][[3]]$test$BIC,
+                                  models$BIC[[5]][[5]]$test$BIC,
+                                  models$BIC[[6]][[7]]$test$BIC,
+                                  models$BIC[[7]][[2]]$test$BIC,
+                                  models$BIC[[8]][[6]]$test$BIC))
 
 plot.BIC.BIC <- ggplot(data = df.BIC, aes(x = x))
 plot.BIC.BIC <- plot.BIC.BIC + geom_line(aes(y = log(150 + BIC_Train), color = 'BIC of Train Set'))
@@ -807,5 +615,196 @@ plot.AIC.BIC <- plot.AIC.BIC + geom_point(aes(y = log(150 + BIC_Train), color = 
 plot.AIC.BIC <- plot.AIC.BIC + geom_line(aes(y = log(150 + BIC_Test), color = 'BIC of Test Set'))
 plot.AIC.BIC <- plot.AIC.BIC + geom_point(aes(y = log(150 + BIC_Test), color = 'BIC of Test Set'), alpha = 0.5)
 
-show(plot.AIC.BIC)
+# show(plot.AIC.BIC)
 
+# f)
+model <- models$AIC[[8]][[6]]
+print(model$CovMat)
+print(sprintf('Unbiased Sigma^2: %f', model$train$UnbiasedSigma2))
+cnames <- colnames(model$CovMat)
+for (i in 1:9) {
+    print(sprintf('Beta(%-11s) = %10.5f ± %10.5f', cnames[i], model$beta[i], model$CovMat[i, i]))
+}
+
+feature.columns <- c()
+for (i in 1:8) {
+    feature.columns <- c(feature.columns, sprintf('V%d', i))
+}
+
+# r.cv.l1o.1 <- cv.l1o.n(train, test, feature.columns)
+
+print('Rcv:')
+print(sprintf('   1 training: %f', model$L1O))
+# print(sprintf('   n training: %f', r.cv.l1o.1))
+
+# g) model selection using L1O
+print("")
+print("|===============================================|")
+print("|                                               |")
+print("|>>>>> Part G: Remove First Feature by L1O <<<<<|")
+print("|                                               |")
+print("|_______________________________________________|")
+models$L1O <- list()
+models$L1O[[8]] <- removeOneAndAnalyze(train, test, c(1, 2, 3, 4, 5, 6, 7, 8))
+
+# g) model selection using L1O
+print("")
+print("|================================================|")
+print("|                                                |")
+print("|>>>>> Part G: Remove Second Feature by L1O <<<<<|")
+print("|                                                |")
+print("|________________________________________________|")
+models$L1O[[7]] <- removeOneAndAnalyze(train, test, c(1, 2, 3, 4, 5, 7, 8))
+
+# g) model selection using L1O
+print("")
+print("|===============================================|")
+print("|                                               |")
+print("|>>>>> Part G: Remove Third Feature by L1O <<<<<|")
+print("|                                               |")
+print("|_______________________________________________|")
+models$L1O[[6]] <- removeOneAndAnalyze(train, test, c(1, 3, 4, 5, 7, 8))
+
+# g) model selection using L1O
+print("")
+print("|================================================|")
+print("|                                                |")
+print("|>>>>> Part G: Remove Fourth Feature by L1O <<<<<|")
+print("|                                                |")
+print("|________________________________________________|")
+models$L1O[[5]] <- removeOneAndAnalyze(train, test, c(3, 4, 5, 7, 8))
+
+# g) model selection using L1O
+print("")
+print("|===============================================|")
+print("|                                               |")
+print("|>>>>> Part G: Remove Fifth Feature by L1O <<<<<|")
+print("|                                               |")
+print("|_______________________________________________|")
+models$L1O[[4]] <- removeOneAndAnalyze(train, test, c(3, 4, 7, 8))
+
+# g) model selection using L1O
+print("")
+print("|===============================================|")
+print("|                                               |")
+print("|>>>>> Part G: Remove Sixth Feature by L1O <<<<<|")
+print("|                                               |")
+print("|_______________________________________________|")
+models$L1O[[3]] <- removeOneAndAnalyze(train, test, c(4, 7, 8))
+
+# g) model selection using L1O
+print("")
+print("|=================================================|")
+print("|                                                 |")
+print("|>>>>> Part G: Remove Seventh Feature by L1O <<<<<|")
+print("|                                                 |")
+print("|_________________________________________________|")
+models$L1O[[2]] <- removeOneAndAnalyze(train, test, c(4, 8))
+
+# g) plots
+df.L1O <- data.frame(x = 1:7,
+                     X = c(6, 2, 1, 5, 3, 7, 8),
+                     L1O = c(models$L1O[[8]]$V6$L1O,
+                             models$L1O[[7]]$V2$L1O,
+                             models$L1O[[6]]$V1$L1O,
+                             models$L1O[[5]]$V5$L1O,
+                             models$L1O[[4]]$V3$L1O,
+                             models$L1O[[3]]$V7$L1O,
+                             models$L1O[[2]]$V8$L1O),
+                     RSS_Train = c(models$L1O[[8]]$V6$train$rss,
+                                   models$L1O[[7]]$V2$train$rss,
+                                   models$L1O[[6]]$V1$train$rss,
+                                   models$L1O[[5]]$V5$train$rss,
+                                   models$L1O[[4]]$V3$train$rss,
+                                   models$L1O[[3]]$V7$train$rss,
+                                   models$L1O[[2]]$V8$train$rss),
+                     RSS_Test = c(models$L1O[[8]]$V6$test$rss,
+                                  models$L1O[[7]]$V2$test$rss,
+                                  models$L1O[[6]]$V1$test$rss,
+                                  models$L1O[[5]]$V5$test$rss,
+                                  models$L1O[[4]]$V3$test$rss,
+                                  models$L1O[[3]]$V7$test$rss,
+                                  models$L1O[[2]]$V8$test$rss))
+
+plot.L1O <- ggplot(data = df.L1O, aes(x = x))
+plot.L1O <- plot.L1O + geom_line(aes(y = log(L1O), color = 'Rcv L1O'))
+plot.L1O <- plot.L1O + geom_point(aes(y = log(L1O), color = 'Rcv L1O'), alpha = 0.5)
+plot.L1O <- plot.L1O + geom_line(aes(y = log(RSS_Train), color = 'RSS of Train Set'))
+plot.L1O <- plot.L1O + geom_point(aes(y = log(RSS_Train), color = 'RSS of Train Set'), alpha = 0.5)
+plot.L1O <- plot.L1O + geom_line(aes(y = log(RSS_Test), color = 'RSS of Test Set'))
+plot.L1O <- plot.L1O + geom_point(aes(y = log(RSS_Test), color = 'RSS of Test Set'), alpha = 0.5)
+# show(plot.L1O)
+
+# h) change test and train ratio
+ratios <- seq(0.1, 0.9, 0.1)
+models$Data <- list()
+feature.columns <- c('V3', 'V4', 'V5', 'V7', 'V8')
+shuffled.data <- data[sample(nrow(data)), c(feature.columns, 'V9')]
+for (i in 1:length(ratios)) {
+    ratio <- ratios[i]
+    ratio.text <- sprintf('%.1f', ratio)
+    models$Data[[ratio.text]] <- list()
+    
+    train <- shuffled.data[1:(nrow(data) * ratio),]
+    test <- shuffled.data[(nrow(data) * ratio + 1):500,]
+    
+    models$Data[[ratio.text]] <- myLM.train(data.matrix(train[, feature.columns]),
+                                            data.matrix(train[, c('V9')]),
+                                            data.matrix(test[, feature.columns]),
+                                            data.matrix(test[, c('V9')]))
+}
+
+df.ratio <- data.frame(x = c(1:9),
+                       X = ratios,
+                       L1O = c(
+                           models$Data$`0.1`$L1O,
+                           models$Data$`0.2`$L1O,
+                           models$Data$`0.3`$L1O,
+                           models$Data$`0.4`$L1O,
+                           models$Data$`0.5`$L1O,
+                           models$Data$`0.6`$L1O,
+                           models$Data$`0.7`$L1O,
+                           models$Data$`0.8`$L1O,
+                           models$Data$`0.9`$L1O),
+                       RSS_Train = c(
+                           models$Data$`0.1`$train$rss,
+                           models$Data$`0.2`$train$rss,
+                           models$Data$`0.3`$train$rss,
+                           models$Data$`0.4`$train$rss,
+                           models$Data$`0.5`$train$rss,
+                           models$Data$`0.6`$train$rss,
+                           models$Data$`0.7`$train$rss,
+                           models$Data$`0.8`$train$rss,
+                           models$Data$`0.9`$train$rss),
+                       RSS_Test = c(
+                           models$Data$`0.1`$test$rss,
+                           models$Data$`0.2`$test$rss,
+                           models$Data$`0.3`$test$rss,
+                           models$Data$`0.4`$test$rss,
+                           models$Data$`0.5`$test$rss,
+                           models$Data$`0.6`$test$rss,
+                           models$Data$`0.7`$test$rss,
+                           models$Data$`0.8`$test$rss,
+                           models$Data$`0.9`$test$rss)
+                       )
+df.ratio$L1O_Mean <- df.ratio$L1O / (nrow(data) * ratios)
+df.ratio$RSS_Train_Mean <- df.ratio$RSS_Train / (nrow(data) * ratios)
+df.ratio$RSS_Test_Mean <- df.ratio$RSS_Test / (nrow(data) * ratios)
+
+plot.ratio <- ggplot(data = df.ratio, aes(x = X))
+plot.ratio <- plot.ratio + geom_line(aes(y = (L1O), color = 'Rcv L1O'))
+plot.ratio <- plot.ratio + geom_point(aes(y = (L1O), color = 'Rcv L1O'), alpha = 0.5)
+plot.ratio <- plot.ratio + geom_line(aes(y = (RSS_Train), color = 'RSS of Train Set'))
+plot.ratio <- plot.ratio + geom_point(aes(y = (RSS_Train), color = 'RSS of Train Set'), alpha = 0.5)
+plot.ratio <- plot.ratio + geom_line(aes(y = (RSS_Test), color = 'RSS of Test Set'))
+plot.ratio <- plot.ratio + geom_point(aes(y = (RSS_Test), color = 'RSS of Test Set'), alpha = 0.5)
+show(plot.ratio)
+
+plot.ratio.mean <- ggplot(data = df.ratio, aes(x = X))
+plot.ratio.mean <- plot.ratio.mean + geom_line(aes(y = (L1O_Mean), color = 'Rcv L1O'))
+plot.ratio.mean <- plot.ratio.mean + geom_point(aes(y = (L1O_Mean), color = 'Rcv L1O'), alpha = 0.5)
+plot.ratio.mean <- plot.ratio.mean + geom_line(aes(y = (RSS_Train_Mean), color = 'RSS of Train Set'))
+plot.ratio.mean <- plot.ratio.mean + geom_point(aes(y = (RSS_Train_Mean), color = 'RSS of Train Set'), alpha = 0.5)
+plot.ratio.mean <- plot.ratio.mean + geom_line(aes(y = (RSS_Test_Mean), color = 'RSS of Test Set'))
+plot.ratio.mean <- plot.ratio.mean + geom_point(aes(y = (RSS_Test_Mean), color = 'RSS of Test Set'), alpha = 0.5)
+show(plot.ratio.mean)
